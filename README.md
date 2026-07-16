@@ -14,6 +14,11 @@ servers, with support for running several servers side by side.
 - Checks for game updates every hour in the background (toggleable), and
   only reports/reinstalls when the Steam build ID actually changes
 - Light / Dark / System theme toggle
+- Window sizes itself to fit your actual screen on launch (rather than a
+  fixed size that could exceed smaller/laptop displays), and the Server
+  and Scheduler & Alerts tabs scroll if their content is taller than the
+  visible window — so nothing (like the Game Port field) can end up
+  stranded off-screen with no way to reach it
 - **Quick Setup** panel: name, description, passwords, ports, max players,
   and the common gameplay toggles (PvP, friendly fire, raids, fast travel,
   etc.), plus a full auto-generated editor for every other key in
@@ -110,25 +115,95 @@ python main.py
   and settings) or **Delete** to remove one (Default can't be deleted).
   Every profile keeps running independently even while you're looking at
   a different one's tabs.
+- **Persistent status bar** — visible at the bottom no matter which tab
+  you're on: green "Server Running", red "Server Stopped", orange
+  "Checking for updates...", or gray "Not Installed".
 - **Server tab** — install/update on demand, start/stop the server, open
-  the install folder, toggle hourly auto-updates, and the Quick Setup
-  panel for name/passwords/ports/common toggles.
+  the install folder, toggle hourly auto-updates, and toggle auto-start-
+  after-check (same setting as in Scheduler & Alerts, shown here too
+  since it's closely tied to the update flow), plus the Quick Setup
+  panel for name/passwords/ports/common toggles. A progress bar appears
+  during installs/updates showing SteamCMD's actual download/verify
+  percentage (parsed from its own progress output), not just a spinner.
+  **The server automatically starts (or restarts) when any of these are
+  true, unless you've manually stopped it (see below):** a brand-new
+  install just finished; an update check found and applied an update; or
+  the "auto-start after checking" toggle is on and a check simply found
+  it not running. Each of these works independently of the others.
+- **In-game announcements: REST API (recommended) vs. RCON.** Palworld
+  has two remote-admin interfaces. RCON is deprecated by Pocketpair, and
+  its `Broadcast`/`Shutdown` message text is documented as unreliable —
+  independent reports confirm messages getting silently dropped or
+  truncated even with correct syntax. The **REST API** is Pocketpair's
+  actively maintained, officially recommended replacement, and its
+  `/announce` and `/shutdown` endpoints reliably display messages
+  in-game. Enable it in Quick Setup ("REST API Enabled" + port, default
+  `8212`) — same `AdminPassword` as RCON. **Countdown warnings and
+  scheduled/update-triggered restarts automatically use the REST API
+  when it's enabled**, falling back to RCON only if the REST API isn't
+  enabled or fails, and falling back further to an immediate stop if
+  neither works.
 - **RCON Console tab** — type any RCON command and press Enter, or use
-  the quick buttons (Info, Show Players, Save World, Broadcast, Shutdown).
-  Click "Use Config Values" to pull the host/port/password from the
-  current profile's config. Requires `RCONEnabled=True` (toggle it in
-  Quick Setup) and a server restart.
+  the quick buttons (Info, Show Players, Save World, Broadcast). Click
+  "Use Config Values" to pull the host/port/password from the current
+  profile's config. Requires `RCONEnabled=True` (toggle it in Quick
+  Setup) and a server restart. The **Shutdown** button uses the same
+  REST-API-first, repeating-every-30s countdown system as scheduled and
+  update-triggered restarts (not a single raw RCON command) — so it gets
+  reliable in-game announcements if the REST API is enabled. Sending
+  `Shutdown` or `DoExit` as a raw *typed* command (not the button) stays
+  a genuine passthrough for testing raw RCON, but still marks the
+  profile as manually stopped, same as clicking Stop Server — so crash
+  auto-restart and auto-start-after-check won't bring it back up just
+  because you shut it down through RCON instead of the button.
 - **Backups tab** — automatic backups run on the interval you set (default
   hourly, keeping the last 12); "Backup Now" triggers one immediately.
-  Restore requires the server to be stopped first.
+  When checking for game updates, it also does a quick, no-download check
+  of Steam's latest build ID first, and if a real update is actually
+  available it takes a labeled `pre_update` backup before applying it
+  (toggleable) — so a bad update doesn't cost you your world. It won't
+  back up on checks where nothing changed. Restore requires the server to
+  be stopped first.
 - **Scheduler & Alerts tab** — set a Discord webhook URL for start/stop/
-  crash/update notifications, enable crash auto-restart, and set daily
-  restart times (24h, e.g. `04:00, 16:00`) with in-game countdown warnings
-  broadcast via RCON before each one.
+  crash/update notifications, enable crash auto-restart, enable
+  restart-after-update (on by default: if the server was running when an
+  update lands, it's stopped and restarted automatically so it isn't left
+  running on stale binaries), enable auto-start-after-check (off by
+  default: starts the server once any update check finishes if it isn't
+  already running — including the very first check when the app opens,
+  so you can have it come up on its own — **unless you stopped it
+  yourself**, see below), set daily restart times (24h, e.g.
+  `04:00, 16:00`) with in-game advance warnings at the minutes-before you
+  configure (default `15, 5, 1` — set it to just `2` for a single
+  2-minute warning), and set the **shutdown countdown** (default 60s)
+  used by both scheduled and update-triggered restarts. Both the advance
+  warnings and the final countdown prefer the REST API when it's enabled
+  (reliable in-game display), falling back to RCON, falling back to a
+  log-only note if neither is enabled. During the final countdown we
+  broadcast our own in-game reminder every 30 seconds (Palworld's native
+  Shutdown command only announces once, not repeatedly), then trigger
+  the actual shutdown, which also lets the world save before exiting.
+  Needs to be at least ~60s for more than one reminder to actually fit —
+  at 60s you get one reminder plus the final countdown; at 90s, two
+  reminders plus the final one. Falls back to an immediate stop if
+  nothing is enabled/reachable or the server doesn't exit in time.
+- **Manually stopping the server sticks, with no exceptions.** Clicking
+  **Stop Server** (or sending `Shutdown`/`DoExit` via RCON) marks the
+  profile as manually stopped, and nothing — crash auto-restart,
+  auto-start-after-check, fresh-install auto-start, not even the very
+  first check right after the app launches — will bring it back up
+  again until you explicitly click **Start Server**, or use the
+  **Clear (allow auto-start)** button described below. A red warning
+  with that button appears right on the Server tab whenever this flag is
+  active, so it's never an invisible reason auto-start "just isn't
+  working" — but it also never gets silently overridden just because
+  you happened to relaunch the app.
 - **Ports tab** — shows `PublicPort` (game port, default `8211`) and
   `RCONPort` (if RCON is enabled), each with a live "Listening /
-  Not listening" status checked every 15 seconds, plus a button to open
-  an external port-reachability check. Remember: "Listening" confirms
+  Not listening" status checked every 15 seconds, a button to open an
+  external port-reachability check, and an "Open in Firewall" button that
+  adds a Windows Firewall inbound rule for that port (Windows only, may
+  need the app run as Administrator). Remember: "Listening" confirms
   the server is bound to the port on this machine — it does **not**
   confirm your router is forwarding it. You'll still need to port-forward
   `PublicPort` (UDP) on your router if you're hosting from home.
@@ -176,6 +251,46 @@ so build it on Windows to get a Windows executable.
 - Scheduled restarts and automated backups (Scheduler & Alerts / Backups
   tabs), by contrast, run continuously in the background **per profile**
   regardless of which tab or profile you currently have open.
+- **Server not showing up in Palworld's Community Server browser?**
+  Palworld's in-game server browser is well documented as unreliable —
+  even correctly configured, reachable servers can just fail to appear or
+  take a long time to show up. That said, in rough order of how often
+  each one is the actual cause:
+  1. **The `-publiclobby` launch flag is what actually registers a server
+     as a Community Server** rather than a private one — without it, the
+     server may work perfectly for direct-IP connections but will never
+     appear in the browser at all. Toggle "Add -publiclobby launch flag"
+     in Quick Setup → Server Visibility.
+  2. Confirm the port is actually reachable from outside (Ports tab →
+     "External check"), not just "Listening" locally, and use "Open in
+     Firewall" (Ports tab) to add a Windows Firewall inbound rule for
+     `PublicPort` — a blocked firewall is one of the most common actual
+     causes.
+  3. Try setting **Public IP** explicitly (Quick Setup → Server
+     Visibility → "Auto-Detect" fills in your actual external IP) —
+     most guidance says leave it blank for a typical home router, but
+     several working setups pair an explicit `PublicIP` with
+     `-publiclobby`, particularly behind double-NAT or unusual routing.
+  4. Try the "Add EpicApp=PalServer launch flag" toggle too — a separate,
+     also community-reported fix, safe to combine with `-publiclobby`.
+  5. Console/crossplay players (Xbox, PS5, Game Pass PC) can *only* join
+     via the Community Server browser — there's no direct-connect option
+     for them, so `-publiclobby` isn't optional if you want them to join.
+  6. Some sources report a **second port (27015, TCP+UDP, Steam query)**
+     also needs forwarding specifically for browser visibility, separate
+     from the main `PublicPort` (8211) game port — worth trying if
+     everything else checks out and it's still not appearing.
+  7. If the world already existed before you changed settings, a
+     `WorldOptions.sav` file can override `PalWorldSettings.ini` — check
+     `Pal/Saved/SaveGames/.../WorldOptions.sav` if changes don't seem to
+     take effect.
+  8. Verify with a third-party tracker like
+     [BattleMetrics](https://www.battlemetrics.com/servers/palworld) —
+     if you show up there, your server is fine; it's the in-game browser
+     that's lagging.
+  9. As a reliable fallback for Steam/PC players, share
+     `your-ip:PublicPort` and have them connect directly rather than
+     searching — this always works regardless of browser flakiness.
 
 ## File overview
 
@@ -187,7 +302,8 @@ so build it on Windows to get a Windows executable.
 | `generate_icon.py` | Regenerates the icon files from scratch if you want to tweak the design |
 | `steam_manager.py` | SteamCMD bootstrap, install/update, start/stop server process |
 | `profiles.py` | Multi-profile management + per-profile settings (JSON) |
-| `rcon_client.py` | Source RCON protocol client used by the RCON Console and scheduler warnings |
+| `rcon_client.py` | Source RCON protocol client used by the RCON Console tab (fallback path for countdowns) |
+| `rest_api_client.py` | Palworld REST API client -- primary path for reliable in-game announcements/shutdowns |
 | `backup_manager.py` | Backup/restore of each profile's save data |
 | `scheduler.py` | Background loop: crash detection/auto-restart, scheduled restarts, periodic backups |
 | `discord_notifier.py` | Discord webhook sender |
