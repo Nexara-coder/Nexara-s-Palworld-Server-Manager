@@ -34,6 +34,15 @@ STEAMCMD_LINUX_URLS = [
 
 MAX_INSTALL_ATTEMPTS = 3
 
+# SteamCMD prints lines like:
+#   "Update state (0x61) downloading, progress: 42.31 (1234567 / 2727272)"
+#   "Update state (0x5) verifying install, progress: 68.20 (...)"
+# while it's actually transferring/checking files -- this is what lets us
+# drive a real progress bar instead of just a wall of log text.
+PROGRESS_LINE_RE = re.compile(
+    r'Update state \(0x[0-9a-fA-F]+\)\s*([a-zA-Z ,]+?),\s*progress:\s*([\d.]+)'
+)
+
 
 def get_base_dir() -> Path:
     """Documents/PalworldServerManager -- created on first run."""
@@ -141,12 +150,17 @@ class SteamManager:
     # ------------------------------------------------------------------ #
     # Install / update / validate the Palworld dedicated server
     # ------------------------------------------------------------------ #
-    def install_or_update(self) -> bool:
+    def install_or_update(self, progress_callback=None) -> bool:
         """
         Runs steamcmd to install/validate the server. Returns True if the
         build id changed (i.e. an actual update was applied), False if it
         was already up to date (or this was the first install, which also
         counts as True).
+
+        progress_callback, if given, is called as progress_callback(stage,
+        pct) with stage a short string like "downloading" and pct a float
+        0-100, whenever SteamCMD reports progress -- lets the caller drive
+        a real progress bar instead of just a log of raw output.
 
         SteamCMD has a well-known quirk: on its very first run (or right
         after updating itself), it updates its own client and disconnects
@@ -171,7 +185,7 @@ class SteamManager:
         for attempt in range(1, MAX_INSTALL_ATTEMPTS + 1):
             self._log(f"Running SteamCMD update/validate for Palworld Dedicated Server "
                       f"(attempt {attempt}/{MAX_INSTALL_ATTEMPTS})...")
-            output = self._run_streamed(args)
+            output = self._run_streamed(args, progress_callback=progress_callback)
 
             if self._output_indicates_success(output):
                 succeeded = True
@@ -182,6 +196,12 @@ class SteamManager:
 
             self._log("SteamCMD didn't confirm the install this time (common on the very "
                       "first run, since it updates itself first). Retrying...")
+
+        if succeeded and progress_callback:
+            try:
+                progress_callback("complete", 100.0)
+            except Exception:
+                pass
 
         if not succeeded and not self.is_installed():
             self._log("Install/update did not complete after "
@@ -216,7 +236,7 @@ class SteamManager:
         ]
         return any(marker in low for marker in failure_markers)
 
-    def _run_streamed(self, args) -> str:
+    def _run_streamed(self, args, progress_callback=None) -> str:
         proc = subprocess.Popen(
             args,
             stdout=subprocess.PIPE,
@@ -225,11 +245,36 @@ class SteamManager:
             bufsize=1,
         )
         collected = []
+        last_pct_logged = -1
         for line in proc.stdout:
             line = line.rstrip()
-            if line:
-                self._log(line)
-                collected.append(line)
+            if not line:
+                continue
+            collected.append(line)
+
+            match = PROGRESS_LINE_RE.search(line)
+            if match and progress_callback:
+                stage = match.group(1).strip()
+                try:
+                    pct = float(match.group(2))
+                except ValueError:
+                    pct = None
+                if pct is not None:
+                    try:
+                        progress_callback(stage, pct)
+                    except Exception:
+                        pass
+                    # Progress lines print very frequently (several times a
+                    # second) -- only log every ~5% to the text log so it
+                    # stays readable, while the callback still gets every
+                    # update for a smooth progress bar.
+                    bucket = int(pct // 5) * 5
+                    if bucket != last_pct_logged:
+                        self._log(f"  {stage}: {pct:.1f}%")
+                        last_pct_logged = bucket
+                    continue  # don't also dump the raw noisy line below
+
+            self._log(line)
         proc.wait()
         return "\n".join(collected)
 
@@ -244,6 +289,40 @@ class SteamManager:
         except Exception:
             return None
 
+    def get_latest_buildid(self):
+        """
+        Asks Steam for the current public-branch build id WITHOUT
+        downloading anything -- just fetches Steam's small app-info cache.
+        Lets callers tell whether an update is actually available before
+        doing anything expensive (like a pre-update backup, or the update
+        itself). Returns None if the query fails for any reason; callers
+        should treat that as "unknown", not "no update available".
+        """
+        self.ensure_steamcmd()
+        exe = str(self.steamcmd_exe_path())
+        args = [
+            exe,
+            "+login", "anonymous",
+            "+app_info_update", "1",
+            "+app_info_print", PALWORLD_APP_ID,
+            "+quit",
+        ]
+        try:
+            proc = subprocess.run(args, capture_output=True, text=True, timeout=60)
+            output = proc.stdout or ""
+        except Exception as e:
+            self._log(f"Could not check the latest available version: {e}")
+            return None
+
+        # VDF output looks roughly like:
+        #   "branches" { "public" { "buildid" "1234567" ... } "beta" {...} }
+        # Grab the first {...} block under "public" and pull buildid from it.
+        block_match = re.search(r'"public"\s*\{(.*?)\}', output, re.DOTALL)
+        if not block_match:
+            return None
+        id_match = re.search(r'"buildid"\s*"(\d+)"', block_match.group(1))
+        return id_match.group(1) if id_match else None
+
     def is_installed(self) -> bool:
         exe_name = "PalServer.exe" if self.is_windows else "PalServer.sh"
         candidates = list(self.server_dir.rglob(exe_name))
@@ -255,9 +334,30 @@ class SteamManager:
         return candidates[0] if candidates else None
 
     def get_config_path(self):
-        """Locate PalWorldSettings.ini regardless of Win/Linux server build."""
-        candidates = list(self.server_dir.rglob("PalWorldSettings.ini"))
-        return candidates[0] if candidates else None
+        """
+        Locate PalWorldSettings.ini. If more than one exists under the
+        install (can happen with leftover/backup copies, or multiple
+        worlds), this deterministically prefers the one at the correct
+        platform-specific path Palworld actually reads from
+        (Pal/Saved/Config/WindowsServer or LinuxServer) rather than
+        picking whichever one the filesystem happens to list first --
+        an unstable, effectively random choice that can otherwise make
+        the app silently edit a different file than the one the running
+        server uses.
+        """
+        candidates = self.get_all_config_paths()
+        if not candidates:
+            return None
+        preferred = self.get_default_config_path()
+        for c in candidates:
+            if c.resolve() == preferred.resolve():
+                return c
+        return candidates[0]
+
+    def get_all_config_paths(self):
+        """All PalWorldSettings.ini files found anywhere under the install
+        -- more than one is a red flag worth surfacing to the user."""
+        return list(self.server_dir.rglob("PalWorldSettings.ini"))
 
     def get_default_config_path(self):
         """Where the ini SHOULD live once the server has been run once."""

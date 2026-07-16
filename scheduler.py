@@ -17,6 +17,7 @@ import time
 import datetime
 
 from rcon_client import RconClient, RconError
+from rest_api_client import PalRestClient, RestApiError
 from discord_notifier import send_discord_message
 
 
@@ -24,12 +25,13 @@ class ServerScheduler:
     POLL_SECONDS = 15
 
     def __init__(self, sm, server_proc, settings, backup_manager,
-                 get_rcon_info, log_callback, on_restart_requested):
+                 get_rcon_info, log_callback, on_restart_requested, get_restapi_info=None):
         self.sm = sm
         self.server_proc = server_proc
         self.settings = settings
         self.backup_manager = backup_manager
         self.get_rcon_info = get_rcon_info  # callable -> (host, port, password, enabled)
+        self.get_restapi_info = get_restapi_info  # callable -> (host, port, password, enabled)
         self._log = log_callback or (lambda msg: None)
         self.on_restart_requested = on_restart_requested
 
@@ -50,9 +52,21 @@ class ServerScheduler:
         self._stop_event.set()
 
     def broadcast(self, message: str):
+        """Prefers the REST API's /announce endpoint (reliably displays
+        in-game; RCON's Broadcast is deprecated and confirmed unreliable),
+        falling back to RCON if the REST API isn't enabled or fails."""
+        if self.get_restapi_info:
+            host, port, password, enabled = self.get_restapi_info()
+            if enabled:
+                try:
+                    PalRestClient(host, port, password).announce(message)
+                    return
+                except RestApiError as e:
+                    self._log(f"REST API broadcast failed ({e}), falling back to RCON...")
+
         host, port, password, enabled = self.get_rcon_info()
         if not enabled:
-            self._log(f"(RCON disabled, warning not broadcast in-game): {message}")
+            self._log(f"(Neither REST API nor RCON enabled -- not broadcast in-game): {message}")
             return
         try:
             with RconClient(host, port, password) as rcon:

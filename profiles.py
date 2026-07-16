@@ -23,6 +23,43 @@ DEFAULT_SETTINGS = {
     "notify_crash": True,
     "notify_update": True,
     "auto_restart_on_crash": True,
+    # If the server is running when an update lands, stop it first (so
+    # SteamCMD isn't overwriting files a live process has open) and start
+    # it again once the update finishes.
+    "restart_after_update": True,
+    # Start the server after ANY update check completes (hourly, manual,
+    # or the very first check when the app launches) if it isn't already
+    # running -- independent of restart_after_update, which only applies
+    # when the server was already running before the check.
+    "auto_start_after_check": False,
+    # Take a backup automatically right before an update is applied (only
+    # when a newer version is actually detected -- not on every check).
+    "backup_before_update": True,
+    # Adds the EpicApp=PalServer launch argument -- a community-reported
+    # fix for servers that are reachable via direct IP but don't show up
+    # in the in-game Community Server browser. Off by default since it's
+    # not universally needed and its effect can vary by game version.
+    "launch_epicapp_flag": False,
+    # Adds the -publiclobby launch flag -- this is what actually registers
+    # the server as a Community Server (vs. private). Off by default so a
+    # server isn't unexpectedly made publicly discoverable.
+    "launch_publiclobby_flag": False,
+    # Tracks whether the person explicitly stopped the server via the Stop
+    # button (as opposed to it not being running yet, or having crashed).
+    # Gates auto_start_after_check and persists across app restarts so
+    # "I stopped it to test something" actually sticks instead of getting
+    # silently reversed by the next update check.
+    "manually_stopped": False,
+    # How long (seconds) automated restarts (update-triggered, scheduled)
+    # give players via Palworld's own in-game countdown before the server
+    # actually exits. We broadcast our own repeating reminder every 30s
+    # (Palworld's native Shutdown command only announces once), handing
+    # off to RCON's Shutdown command for the final stretch, which also
+    # lets the world save properly. Falls back to a hard kill if RCON
+    # isn't reachable or the process doesn't exit in time. Needs to be at
+    # least ~60s for more than one reminder to actually fit before the
+    # final announcement.
+    "shutdown_countdown_seconds": 60,
     # 24h "HH:MM" local-time strings, checked daily
     "restart_times": [],
     # Minutes-before-restart to broadcast in-game warnings at
